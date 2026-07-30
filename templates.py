@@ -1,151 +1,154 @@
 """
 templates.py
 
-Prompt templates for Step 2: Prompting.
+Step 6: Prompt Templates.
 
-Each template takes a student's topic or question and returns a list of
-chat messages -- the same shape OllamaClient.chat() expects -- built
-according to a specific prompting technique:
+A small library of reusable, tutoring-specific templates. Each template
+declares the fields it needs (dynamic input substitution) and a function
+that turns those field values into a plain-language instruction -- the
+"what" of the request.
 
-- Zero-shot         ask directly, no examples, no reasoning scaffold
-- Few-shot          show a couple of worked examples first, so the model
-                    mirrors their structure and tone
-- Chain-of-thought  explicitly ask the model to reason step by step before
-                    giving a final answer
-- Role              give the model a persona (supplied by the user) to
-                    answer from
-
-Each template is deliberately tutoring-flavoured (explaining concepts,
-working through problems), since that's the domain of this project, but the
-underlying pattern behind each technique is generic and reusable elsewhere.
-
-No topic, example, or role content is hardcoded anywhere in this file. The
-topic always comes from the user at runtime; for few-shot, the worked
-examples do too; for role, so does the persona description (see chat.py,
-which collects these interactively) -- this module only supplies the
-structure each technique wraps that input in.
+Templates know nothing about prompting technique (that's techniques.py's
+job -- the "how"). Any template can be paired with any technique in
+chat.py, so e.g. "Generate a Quiz" can be asked zero-shot, few-shot,
+chain-of-thought, or in a role, without templates.py changing at all.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable
 
 
 @dataclass(frozen=True)
-class PromptTechnique:
-    """A named prompting technique and the function that builds its prompt."""
+class Field:
+    """One piece of input a template needs from the user."""
+
+    name: str
+    prompt: str
+    multiline: bool = False
+    default: str | None = None
+    choices: dict[str, str] | None = None  # menu key -> substituted value
+
+
+@dataclass(frozen=True)
+class Template:
+    """A reusable task template: what fields it needs, and how to turn
+    those fields into a plain-language instruction for the model."""
 
     name: str
     description: str
-    build: Callable[..., list[dict]]
+    fields: list[Field] = field(default_factory=list)
+    build_instruction: Callable[[dict[str, str]], str] = lambda values: ""
 
 
-def zero_shot(topic: str) -> list[dict]:
-    """No examples, no reasoning scaffold -- just ask directly."""
-    return [
-        {
-            "role": "system",
-            "content": "You are an AI tutor. Answer clearly and directly.",
-        },
-        {
-            "role": "user",
-            "content": f"Explain the concept of {topic} to a student in simple, clear terms.",
-        },
-    ]
+def _explain_instruction(values: dict[str, str]) -> str:
+    return f"Explain the concept of {values['topic']} to a student in clear, complete terms."
 
 
-def few_shot(topic: str, examples: list[tuple[str, str]]) -> list[dict]:
-    """
-    Show the model a handful of worked (question, answer) example pairs
-    before the real question, so it mirrors their style and structure.
-
-    Unlike the other techniques, few-shot needs example content beyond the
-    topic itself -- but that content is supplied by the user at runtime
-    (see chat.py's collect_examples()), never hardcoded here. With no
-    examples supplied, this degrades gracefully to a zero-shot-style ask.
-    """
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are an AI tutor. Answer the student's question in the "
-                "same style, tone, and structure as the example answers "
-                "shown to you."
-            ),
-        }
-    ]
-
-    for question, answer in examples:
-        messages.append({"role": "user", "content": question})
-        messages.append({"role": "assistant", "content": answer})
-
-    messages.append({"role": "user", "content": topic})
-    return messages
+def _summarize_instruction(values: dict[str, str]) -> str:
+    return (
+        "Summarize the following study material for a student, capturing "
+        f"the key points:\n\n{values['material']}"
+    )
 
 
-def chain_of_thought(topic: str) -> list[dict]:
-    """Explicitly ask the model to reason step by step before concluding."""
-    return [
-        {
-            "role": "system",
-            "content": (
-                "You are an AI tutor. When solving a problem, think through "
-                "it step by step out loud, then clearly state the final "
-                "answer at the end."
-            ),
-        },
-        {
-            "role": "user",
-            "content": (
-                f"{topic}\n\n"
-                "Work through this step by step, showing your reasoning, "
-                "then give the final answer on its own line."
-            ),
-        },
-    ]
+def _simplify_instruction(values: dict[str, str]) -> str:
+    return (
+        f"Simplify the concept of {values['topic']} using plain language, "
+        "short sentences, and a relatable analogy, for a student who is "
+        "struggling to understand it."
+    )
 
 
-def role_based(topic: str, role: str) -> list[dict]:
-    """
-    Give the model a persona to answer from -- shapes tone and approach,
-    not just content.
-
-    The role is supplied by the user at runtime (see chat.py), not
-    hardcoded here, so it can be anything from "a patient elementary school
-    teacher" to "a no-nonsense drill sergeant."
-    """
-    return [
-        {
-            "role": "system",
-            "content": f"You are {role}. Answer the student's question from that perspective.",
-        },
-        {
-            "role": "user",
-            "content": f"Can you help me understand {topic}?",
-        },
-    ]
+def _quiz_instruction(values: dict[str, str]) -> str:
+    count = values.get("count") or "5"
+    if values["format"] == "multiple-choice":
+        return (
+            f"Generate {count} multiple-choice questions about "
+            f"{values['topic']}. For each question, provide four options "
+            "labeled A-D and clearly state the correct answer."
+        )
+    return (
+        f"Generate {count} open-ended quiz questions about "
+        f"{values['topic']}, each followed by a model answer."
+    )
 
 
-TECHNIQUES: dict[str, PromptTechnique] = {
-    "1": PromptTechnique(
-        name="Zero-Shot",
-        description="Ask directly, no examples given",
-        build=zero_shot,
+def _solve_instruction(values: dict[str, str]) -> str:
+    return f"Solve the following problem:\n\n{values['problem']}"
+
+
+def _revision_notes_instruction(values: dict[str, str]) -> str:
+    return (
+        f"Create concise revision notes on {values['topic']} for a student "
+        "preparing for an exam. Use short bullet points and highlight the "
+        "most exam-relevant details."
+    )
+
+
+def _study_plan_instruction(values: dict[str, str]) -> str:
+    return (
+        f"Create a study plan for {values['subject']}, to be completed "
+        f"within {values['timeframe']}. Break it into a day-by-day or "
+        "session-by-session schedule with a clear goal for each session."
+    )
+
+
+TEMPLATES: dict[str, Template] = {
+    "1": Template(
+        name="Explain a Concept",
+        description="Generate an explanation of an academic topic",
+        fields=[Field("topic", "What topic or concept should be explained?")],
+        build_instruction=_explain_instruction,
     ),
-    "2": PromptTechnique(
-        name="Few-Shot",
-        description="Provide your own worked examples to set the format",
-        build=few_shot,
+    "2": Template(
+        name="Summarize Study Material",
+        description="Summarize pasted study material, no examples",
+        fields=[
+            Field("material", "Paste the study material to summarize:", multiline=True)
+        ],
+        build_instruction=_summarize_instruction,
     ),
-    "3": PromptTechnique(
-        name="Chain-of-Thought",
-        description="Ask the model to reason step by step",
-        build=chain_of_thought,
+    "3": Template(
+        name="Simplify a Concept",
+        description="Simplify a complex concept for a struggling student",
+        fields=[Field("topic", "What concept should be simplified?")],
+        build_instruction=_simplify_instruction,
     ),
-    "4": PromptTechnique(
-        name="Role",
-        description="Answer in-character as a persona you provide",
-        build=role_based,
+    "4": Template(
+        name="Generate a Quiz",
+        description="Generate quiz questions, multiple-choice or open-ended",
+        fields=[
+            Field("topic", "What topic should the quiz cover?"),
+            Field("count", "How many questions? (default 5)", default="5"),
+            Field(
+                "format",
+                "Quiz format:",
+                choices={"1": "multiple-choice", "2": "open-ended"},
+            ),
+        ],
+        build_instruction=_quiz_instruction,
+    ),
+    "5": Template(
+        name="Solve a Problem",
+        description="Work through an academic or reasoning problem",
+        fields=[Field("problem", "Enter the problem to solve:", multiline=True)],
+        build_instruction=_solve_instruction,
+    ),
+    "6": Template(
+        name="Create Revision Notes",
+        description="Turn a topic into concise, exam-focused revision notes",
+        fields=[Field("topic", "What topic should the revision notes cover?")],
+        build_instruction=_revision_notes_instruction,
+    ),
+    "7": Template(
+        name="Create a Study Plan",
+        description="Build a day-by-day or session-by-session study schedule",
+        fields=[
+            Field("subject", "What subject or topics should the plan cover?"),
+            Field("timeframe", "How much time is available (e.g. '2 weeks')?"),
+        ],
+        build_instruction=_study_plan_instruction,
     ),
 }

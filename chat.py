@@ -2,13 +2,21 @@
 """
 chat.py
 
-Console entry point for the AI Tutor project.
+Console entry point for the AI Tutor project (Steps 2-6: Prompting).
 
-Step 2: Prompting -- pick a prompting technique (zero-shot, few-shot,
-chain-of-thought, or role) and see exactly how it shapes the prompt sent to
-the local LLM, alongside the model's response. The prompt is always printed
-before the request is sent, so the difference between techniques is visible,
-not just their output.
+Flow:
+    1. Pick a template -- what you want help with (explain, summarize,
+       simplify, quiz, solve a problem, revision notes, study plan).
+       Templates live in templates.py and declare the fields they need.
+    2. Fill in that template's fields.
+    3. Pick a prompting technique -- how the request should be asked
+       (zero-shot, few-shot, chain-of-thought, role). Techniques live in
+       techniques.py.
+    4. See the exact prompt built from that combination, then the model's
+       response.
+
+Any template can be paired with any technique -- e.g. "Generate a Quiz"
+can be asked zero-shot, few-shot, chain-of-thought, or in a role.
 
 Usage:
     python chat.py
@@ -20,39 +28,83 @@ import sys
 
 from config import Settings
 from llm_client import OllamaClient, OllamaConnectionError, OllamaResponseError
-from templates import TECHNIQUES, PromptTechnique
+from templates import TEMPLATES, Template, Field
+from techniques import TECHNIQUES, ROLES, PromptTechnique
 
 
 def print_header(settings: Settings) -> None:
     print("=" * 64)
-    print("AI Tutor -- Step 2: Prompting")
+    print("AI Tutor -- Prompting Console")
     print(f"Model : {settings.model}")
     print(f"Host  : {settings.host}")
     print("=" * 64)
 
 
-def print_menu() -> None:
-    print("\nChoose a prompting technique:")
-    for key, technique in TECHNIQUES.items():
-        print(f"  {key}) {technique.name:<16} {technique.description}")
+def print_menu(title: str, items: dict) -> None:
+    print(f"\n{title}")
+    width = max(len(item.name) for item in items.values()) + 2
+    for key, item in items.items():
+        print(f"  {key}) {item.name:<{width}}{item.description}")
     print("  q) Quit")
 
 
-def print_prompt(messages: list[dict]) -> None:
-    """Show exactly what is sent to the model, so the technique is visible."""
-    print("\n--- Prompt sent to the model ---")
-    for message in messages:
-        print(f"[{message['role']}]")
-        print(message["content"].strip())
-        print()
-    print("---------------------------------")
+def choose_from_menu(title: str, items: dict):
+    """Show a menu of Template or PromptTechnique entries and return the
+    chosen one, or None if the user wants to quit."""
+    print_menu(title, items)
+    while True:
+        try:
+            choice = input("\n> ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return None
+
+        if choice in {"q", "quit", "exit"}:
+            return None
+
+        item = items.get(choice)
+        if item is None:
+            print("Not a valid option, try again.")
+            continue
+        return item
+
+
+def read_field(field: Field) -> str:
+    if field.choices:
+        print(f"\n{field.prompt}")
+        for key, label in field.choices.items():
+            print(f"  {key}) {label}")
+        while True:
+            choice = input("> ").strip()
+            if choice in field.choices:
+                return field.choices[choice]
+            print("Not a valid option, try again.")
+
+    if field.multiline:
+        print(f"\n{field.prompt} (finish with an empty line)")
+        lines: list[str] = []
+        while True:
+            line = input()
+            if line == "":
+                break
+            lines.append(line)
+        value = "\n".join(lines).strip()
+    else:
+        value = input(f"\n{field.prompt} ").strip()
+
+    if not value and field.default is not None:
+        return field.default
+    return value
+
+
+def collect_fields(template: Template) -> dict[str, str]:
+    return {f.name: read_field(f) for f in template.fields}
 
 
 def collect_examples() -> list[tuple[str, str]]:
     """
-    Interactively collect (question, answer) example pairs from the user for
-    few-shot prompting. Entered live, every time -- nothing here is
-    pre-written.
+    Interactively collect (question, answer) example pairs for few-shot
+    prompting. Entered live, every time -- nothing here is pre-written.
     """
     print("\nProvide a few worked examples so the model can learn the style.")
     print("Leave the question blank when you're done adding examples.")
@@ -71,55 +123,45 @@ def collect_examples() -> list[tuple[str, str]]:
     return examples
 
 
-def collect_role() -> str:
-    """
-    Interactively collect the persona the model should adopt for role
-    prompting. Entered live, every time -- nothing here is pre-written.
-    """
-    print("\nDescribe the role the model should play, e.g. 'a patient")
-    print("elementary school teacher' or 'a strict university professor'.")
-    return input("Role: ").strip()
+def choose_role() -> str | None:
+    print("\nChoose a tutor role:")
+    for key, (name, _description) in ROLES.items():
+        print(f"  {key}) {name}")
+    print("  q) Quit")
+
+    while True:
+        choice = input("> ").strip().lower()
+        if choice in {"q", "quit", "exit"}:
+            return None
+        if choice in ROLES:
+            return ROLES[choice][1]
+        print("Not a valid option, try again.")
 
 
-def run_technique(client: OllamaClient, technique: PromptTechnique) -> None:
+def print_prompt(messages: list[dict]) -> None:
+    """Show exactly what is sent to the model, so the technique is visible."""
+    print("\n--- Prompt sent to the model ---")
+    for message in messages:
+        print(f"[{message['role']}]")
+        print(message["content"].strip())
+        print()
+    print("---------------------------------")
+
+
+def build_messages(technique: PromptTechnique, instruction: str) -> list[dict] | None:
+    """Collect any extra input a technique needs, then build its messages.
+    Returns None if the user quits mid-flow."""
     if technique.name == "Few-Shot":
         examples = collect_examples()
-        topic = input("\nNow enter your actual topic or question: ").strip()
-        if not topic:
-            print("(nothing entered, back to menu)")
-            return
-        messages = technique.build(topic, examples=examples)
+        return technique.build(instruction, examples=examples)
 
-    elif technique.name == "Role":
-        role = collect_role()
-        if not role:
-            print("(no role entered, back to menu)")
-            return
-        topic = input("\nNow enter your actual topic or question: ").strip()
-        if not topic:
-            print("(nothing entered, back to menu)")
-            return
-        messages = technique.build(topic, role=role)
+    if technique.name == "Role":
+        role_description = choose_role()
+        if role_description is None:
+            return None
+        return technique.build(instruction, role_description=role_description)
 
-    else:
-        topic = input(f"\nEnter a topic or question for {technique.name}: ").strip()
-        if not topic:
-            print("(nothing entered, back to menu)")
-            return
-        messages = technique.build(topic)
-
-    print_prompt(messages)
-
-    print("Thinking...")
-    try:
-        reply = client.chat(messages)
-    except (OllamaConnectionError, OllamaResponseError) as exc:
-        print(f"[error] {exc}")
-        return
-
-    print("\n--- Response ---")
-    print(reply)
-    print("----------------")
+    return technique.build(instruction)
 
 
 def main() -> int:
@@ -139,23 +181,40 @@ def main() -> int:
     print_header(settings)
 
     while True:
-        print_menu()
         try:
-            choice = input("\n> ").strip().lower()
+            template = choose_from_menu("Step 1 -- choose what you want help with:", TEMPLATES)
+            if template is None:
+                print("Goodbye.")
+                return 0
+
+            values = collect_fields(template)
+            instruction = template.build_instruction(values)
+
+            technique = choose_from_menu("\nStep 2 -- choose a prompting technique:", TECHNIQUES)
+            if technique is None:
+                print("Goodbye.")
+                return 0
+
+            messages = build_messages(technique, instruction)
+            if messages is None:
+                print("Goodbye.")
+                return 0
         except (EOFError, KeyboardInterrupt):
             print("\nGoodbye.")
             return 0
 
-        if choice in {"q", "quit", "exit"}:
-            print("Goodbye.")
-            return 0
+        print_prompt(messages)
 
-        technique = TECHNIQUES.get(choice)
-        if technique is None:
-            print("Not a valid option, try again.")
+        print("Thinking...")
+        try:
+            reply = client.chat(messages)
+        except (OllamaConnectionError, OllamaResponseError) as exc:
+            print(f"[error] {exc}")
             continue
 
-        run_technique(client, technique)
+        print("\n--- Response ---")
+        print(reply)
+        print("----------------")
 
 
 if __name__ == "__main__":
