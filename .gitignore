@@ -3,3 +3,6 @@ __pycache__/
 .venv/
 venv/
 .env
+
+# Memory System: local per-user learning history, not shared project data
+*.db

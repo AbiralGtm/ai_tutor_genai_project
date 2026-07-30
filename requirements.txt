@@ -1,2 +1,8 @@
 requests>=2.31.0
 python-dotenv>=1.0.0
+
+# LangChain Chains (chains.py). LLMChain/SequentialChain moved out of the
+# core `langchain` package as of LangChain 1.0 -- langchain-classic is the
+# official compatibility package that still provides them.
+langchain-classic>=1.0.0
+langchain-ollama>=1.1.0

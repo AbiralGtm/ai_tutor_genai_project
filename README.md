@@ -8,6 +8,12 @@
   chain-of-thought, role) to apply to it. Any template can be combined with
   any technique, and the constructed prompt is always printed before it's
   sent.
+- **Step 7: LangChain Chains** -- a sequential workflow (Topic ->
+  Explanation -> Notes -> Quiz) built with LangChain, where each stage's
+  output feeds the next.
+- **Step 8: Memory System** -- a local SQLite profile per student, tracking
+  learning history across runs and feeding it back into prompts so
+  responses adapt to what's already known about that student.
 
 ## Prerequisites
 
@@ -34,8 +40,41 @@ cp .env.example .env          # adjust if your Ollama host/model differ
 ## Run
 
 ```bash
-python chat.py
+python main.py
 ```
+
+This first asks who's studying:
+
+```
+Who's studying today?
+Enter your name:
+```
+
+A new name creates a profile; an existing one (matched case-insensitively)
+logs back in with a short recap of what you last studied. Then the
+top-level launcher opens:
+
+```
+Choose a tool:
+  1) Prompting Console   Manual templates + prompting techniques
+  2) LangChain Workflow  Topic -> Explanation -> Notes -> Quiz pipeline
+  q) Quit
+```
+
+Quitting a tool (its own `q`) returns you to this menu rather than exiting
+the program, and you stay logged in as the same profile the whole time.
+`main.py` is only a dispatcher -- it imports `chat` or `chains` lazily,
+right when you pick that option, and holds no prompting logic of its own.
+Both tools also run standalone if you'd rather skip the launcher (each
+will ask you to log in itself, since there's no shared session to hand
+off from):
+
+```bash
+python chat.py      # Prompting Console directly
+python chains.py    # LangChain Workflow directly
+```
+
+### Prompting Console
 
 **Step 1 -- choose what you want help with:**
 
@@ -47,6 +86,8 @@ python chat.py
   5) Solve a Problem           Work through an academic or reasoning problem
   6) Create Revision Notes     Turn a topic into concise, exam-focused revision notes
   7) Create a Study Plan       Build a day-by-day or session-by-session study schedule
+  8) View History              See your past topics and techniques
+  9) Continue a Conversation   Resume a past conversation where you left off
   q) Quit
 ```
 
@@ -73,15 +114,113 @@ Teacher, Examiner, Study Coach, or Subject Expert.
 The app then prints the exact prompt it built from your template + technique
 combination, sends it to the model, and shows the response.
 
+**After a response**, you can keep the conversation going:
+
+```
+Ask a follow-up, Enter for a new topic, or 'q' to quit:
+```
+
+A follow-up is appended to the same message list (so the model still has
+the full conversation as context) and sent again. Press Enter with nothing
+typed to head back to Step 1 for an unrelated topic, or `q` to quit
+outright. The whole exchange -- including how many follow-ups you asked,
+and the full message transcript -- is recorded as one entry in your
+learning history.
+
+**Options 8 and 9 at Step 1** work with that history:
+
+- **View History** lists your recent entries, most recent first, each
+  tagged `(resumable)` if it has a saved transcript.
+- **Continue a Conversation** lists only the resumable ones; picking one
+  reloads its exact message transcript and drops you straight into the
+  same follow-up loop, so the model still has everything said in that
+  conversation as context. Continuing creates a new history entry marked
+  "(continued from history)" rather than editing the original.
+
+### LangChain Workflow (Step 7)
+
+Enter a topic and the app runs a three-stage pipeline, printing each stage
+as it completes:
+
+```
+Topic -> Explanation -> Notes -> Quiz
+```
+
+1. **Explanation** -- explains the topic.
+2. **Revision Notes** -- built from stage 1's explanation, not the raw topic.
+3. **Quiz** -- 5 multiple-choice questions, built from stage 2's notes.
+
+Each stage is its own `LLMChain` (`explanation_chain`, `notes_chain`,
+`quiz_chain` in `chains.py`) and can be run standalone -- e.g.
+`notes_chain.invoke({"explanation": "..."})` works on its own, without a
+topic or the rest of the pipeline. `build_pipeline()` composes all three
+into a `SequentialChain`, which passes outputs between chains by matching
+each chain's `output_key` to the next chain's prompt input: `explanation_chain`
+outputs `"explanation"`, which `notes_chain`'s prompt consumes; `notes_chain`
+outputs `"notes"`, which `quiz_chain`'s prompt consumes.
+
+This uses LangChain's classic `LLMChain`/`SequentialChain` API rather than
+the newer LCEL (`prompt | llm`) style. As of LangChain 1.0, that API moved
+out of the core `langchain` package into `langchain-classic` -- still fully
+supported, just no longer the default recommendation upstream (which is why
+`chains.py` suppresses the resulting deprecation warning).
+
+`chains.py` is a separate subsystem from `chat.py`: `chat.py` builds message
+lists by hand and talks to Ollama through `llm_client.OllamaClient`, while
+`chains.py` lets LangChain manage prompting and chain composition via its
+own Ollama integration (`langchain_ollama.OllamaLLM`). Both point at the
+same local model and the same `config.py` settings; `chains.py` also reuses
+`OllamaClient.health_check()` for its pre-flight connectivity check.
+
+## Memory System (Step 8)
+
+`memory.py` stores two things in a local SQLite file (`memory.db` by
+default, no server or extra dependency -- `sqlite3` is in Python's standard
+library):
+
+- **users** -- one row per profile (name, created/last-seen timestamps),
+  matched case-insensitively so "Abiral" and "abiral" are the same person.
+- **interactions** -- one row per completed request: which tool, which
+  template/technique (or "LangChain pipeline"), the topic, and a short
+  summary. Written after every successful response in both `chat.py` and
+  `chains.py`. For the Prompting Console specifically, the full message
+  transcript is saved too (as JSON), which is what makes "Continue a
+  Conversation" possible -- `chains.py`'s pipeline runs don't save one,
+  since there's no equivalent open-ended conversation to resume.
+
+Logging in (`memory.login()`) resolves a typed name to a profile, creating
+one if it doesn't exist, and prints a short recap of recent topics for a
+returning user. `main.py` calls this once and shares the profile with
+whichever tool you pick; `chat.py` and `chains.py` call it themselves when
+run standalone.
+
+Before every request, `memory.build_context()` turns a user's recent
+history into a short paragraph (e.g. *"You are tutoring Abiral. They have
+recently studied: 'recursion'; 'photosynthesis'. Use this history to
+personalize your response..."*) which gets folded into the prompt:
+
+- In `chat.py`, it's appended to whichever technique's system message was
+  built (all four put a system message first).
+- In `chains.py`, it's passed as a `memory_context` input to the
+  explanation stage's `PromptTemplate`; personalization then flows into
+  the notes and quiz stages implicitly, since they're built from the
+  (already personalized) explanation text rather than the raw topic again.
+
+The database file is gitignored (`*.db`) since it's local, per-user state,
+not project source.
+
 ## Project layout
 
 | File | Purpose |
 |---|---|
-| `config.py` | Environment-driven settings (host, model, timeout) |
+| `main.py` | Top-level launcher -- logs in once, dispatches to `chat.py` or `chains.py` |
+| `config.py` | Environment-driven settings (host, model, timeout, memory DB path) |
 | `llm_client.py` | `OllamaClient` -- generic, reusable wrapper around Ollama's chat API |
+| `memory.py` | Step 8: Memory System -- user profiles + learning history (SQLite) |
 | `templates.py` | Step 6: reusable task templates (the "what") -- fields + instruction builders |
 | `techniques.py` | Steps 2-5: prompting techniques (the "how") -- zero-shot, few-shot, chain-of-thought, role |
-| `chat.py` | Console app that ties templates + techniques + client together |
+| `chat.py` | Prompting Console -- ties templates + techniques + client + memory together |
+| `chains.py` | Step 7: LangChain sequential workflow (Topic -> Explanation -> Notes -> Quiz), memory-aware |
 
 `llm_client.py` stays fully generic -- no tutoring-specific code. Templates
 and techniques are deliberately separate: a template decides *what* is
@@ -124,3 +263,4 @@ Set via environment variables or `.env`:
 | `OLLAMA_HOST` | `http://localhost:11434` | Base URL of the Ollama server |
 | `OLLAMA_MODEL` | `llama3.2` | Model tag to use |
 | `OLLAMA_TIMEOUT` | `60` | Request timeout in seconds |
+| `MEMORY_DB_PATH` | `memory.db` | Path to the Memory System's SQLite file |

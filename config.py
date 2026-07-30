@@ -22,3 +22,4 @@ class Settings:
     host: str = os.getenv("OLLAMA_HOST", "http://localhost:11434")
     model: str = os.getenv("OLLAMA_MODEL", "llama3.2")
     timeout: float = float(os.getenv("OLLAMA_TIMEOUT", "60"))
+    memory_db_path: str = os.getenv("MEMORY_DB_PATH", "memory.db")
