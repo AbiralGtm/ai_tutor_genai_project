@@ -23,3 +23,4 @@ class Settings:
     model: str = os.getenv("OLLAMA_MODEL", "llama3.2")
     timeout: float = float(os.getenv("OLLAMA_TIMEOUT", "60"))
     memory_db_path: str = os.getenv("MEMORY_DB_PATH", "memory.db")
+    embedding_model: str = os.getenv("EMBEDDING_MODEL", "nomic-embed-text")

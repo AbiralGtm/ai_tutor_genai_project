@@ -14,15 +14,24 @@
 - **Step 8: Memory System** -- a local SQLite profile per student, tracking
   learning history across runs and feeding it back into prompts so
   responses adapt to what's already known about that student.
+- **Step 9: RAG** -- index your own PDF/TXT/MD study material and get
+  answers grounded in it, instead of just whatever the model already knows.
+- **Step 10: Agent** -- a tool-calling agent that can reach for a
+  deterministic tool (e.g. an exact day-by-day study plan) instead of
+  writing out arithmetic it tends to get wrong itself.
 
 ## Prerequisites
 
 1. [Install Ollama](https://ollama.com/download).
-2. Pull the model:
+2. Pull the chat model:
    ```bash
    ollama pull llama3.2
    ```
-3. Make sure the server is running (Ollama usually starts this automatically;
+3. Pull the embedding model (needed for RAG -- Step 9):
+   ```bash
+   ollama pull nomic-embed-text
+   ```
+4. Make sure the server is running (Ollama usually starts this automatically;
    otherwise):
    ```bash
    ollama serve
@@ -86,8 +95,11 @@ python chains.py    # LangChain Workflow directly
   5) Solve a Problem           Work through an academic or reasoning problem
   6) Create Revision Notes     Turn a topic into concise, exam-focused revision notes
   7) Create a Study Plan       Build a day-by-day or session-by-session study schedule
-  8) View History              See your past topics and techniques
-  9) Continue a Conversation   Resume a past conversation where you left off
+  8) View History                  See your past topics and techniques
+  9) Continue a Conversation       Resume a past conversation where you left off
+  10) Index Study Material          Upload a PDF/TXT/MD file for grounded Q&A
+  11) Ask About My Study Materials  Answer questions using your indexed material (RAG)
+  12) Ask the Agent                 Chat with a tool-using agent (e.g. exact day-by-day study plans)
   q) Quit
 ```
 
@@ -209,6 +221,73 @@ personalize your response..."*) which gets folded into the prompt:
 The database file is gitignored (`*.db`) since it's local, per-user state,
 not project source.
 
+## RAG (Step 9)
+
+`rag.py` lets you index your own study material and get answers grounded
+in it, via Step 1's options 10 and 11.
+
+**10) Index Study Material** asks for a path to a `.pdf`, `.txt`, or `.md`
+file, then:
+
+1. Extracts its text (`pypdf` for PDFs, plain read for `.txt`/`.md`).
+2. Splits it into ~800-character overlapping chunks (`chunk_text()` --
+   simple and dependency-free, doesn't try to respect sentence boundaries).
+3. Embeds each chunk with a local Ollama embedding model (`nomic-embed-text`
+   by default) via `OllamaClient.embed()`.
+4. Stores the chunks and their embeddings in the same local SQLite file
+   `memory.py` uses, scoped to your user profile.
+
+**11) Ask About My Study Materials** embeds your question the same way,
+scores it against every stored chunk for your profile with cosine
+similarity computed directly in Python (`retrieve()` -- no vector
+database, brute-force search over your own notes), and takes the top 4
+matches. Those chunks get built into a grounded prompt (`build_rag_messages()`)
+that instructs the model to answer from that context and say so plainly if
+the material doesn't cover the question, rather than guessing. From there
+it's the same `run_conversation()` follow-up loop, memory personalization,
+and history recording as every other option.
+
+This is a genuinely simple, custom retrieval store -- not Chroma/FAISS/a
+production vector DB -- which is a deliberate fit for the scale here (one
+student's own notes, dozens to a few hundred chunks) and keeps the "one
+local SQLite file, no server" approach consistent with `memory.py`.
+
+## Agent (Step 10)
+
+**12) Ask the Agent** starts a conversation with a tool-calling agent, via
+Ollama's *native* tool-calling (the `tools` field on `/api/chat` -- the
+model itself decides when to call a tool, no hand-rolled prompt parsing).
+
+Right now there's one tool, `create_study_plan` (`tools.py`): given a
+subject, a number of days, optional topics, and hours/day, it
+deterministically cycles through the topics day by day and inserts a
+review day every 4th day. This is the kind of thing a small local model
+tends to get wrong on its own -- miscounting days, uneven topic coverage --
+so the tool does the arithmetic exactly, and the model's job is just to
+present the result well.
+
+The loop (`agent.run_turn()` in `agent.py`):
+
+1. Send the conversation to the model with `tools=TOOL_SCHEMAS`.
+2. If the response requests a tool call, run it (`tools.call_tool()`) and
+   append the result as a `"tool"` role message.
+3. Send the conversation again -- repeat until the model returns a plain
+   answer (bounded at 4 rounds, to avoid a runaway loop).
+
+`chat.py` shows this happening rather than hiding it -- you'll see
+`[agent calling tool: create_study_plan(...)]` and `[tool result] ...`
+printed before the final `--- Response ---`. From there it's the same
+follow-up loop, memory personalization, and history recording as every
+other option; resuming an agent conversation from **9) Continue a
+Conversation** correctly routes back through the tool-calling loop (not
+the plain one), since each interaction records which kind it was.
+
+Adding a new tool means writing the function and its JSON-schema
+description in `tools.py` (`TOOL_SCHEMAS` / `TOOL_FUNCTIONS`) -- `agent.py`
+itself has no tool-specific code. No new dependency was needed for this --
+tool-calling goes through the same `requests`-based `OllamaClient` as
+everything else (`OllamaClient.chat_with_tools()`).
+
 ## Project layout
 
 | File | Purpose |
@@ -217,9 +296,12 @@ not project source.
 | `config.py` | Environment-driven settings (host, model, timeout, memory DB path) |
 | `llm_client.py` | `OllamaClient` -- generic, reusable wrapper around Ollama's chat API |
 | `memory.py` | Step 8: Memory System -- user profiles + learning history (SQLite) |
+| `rag.py` | Step 9: RAG -- chunking, embedding, storage, and retrieval over study material (SQLite) |
+| `tools.py` | Step 10: Agent tools -- deterministic functions + their JSON-schema descriptions |
+| `agent.py` | Step 10: Agent -- the tool-calling loop (`run_turn()`), model-agnostic to which tools exist |
 | `templates.py` | Step 6: reusable task templates (the "what") -- fields + instruction builders |
 | `techniques.py` | Steps 2-5: prompting techniques (the "how") -- zero-shot, few-shot, chain-of-thought, role |
-| `chat.py` | Prompting Console -- ties templates + techniques + client + memory together |
+| `chat.py` | Prompting Console -- ties templates + techniques + client + memory + RAG + agent together |
 | `chains.py` | Step 7: LangChain sequential workflow (Topic -> Explanation -> Notes -> Quiz), memory-aware |
 
 `llm_client.py` stays fully generic -- no tutoring-specific code. Templates
@@ -263,4 +345,5 @@ Set via environment variables or `.env`:
 | `OLLAMA_HOST` | `http://localhost:11434` | Base URL of the Ollama server |
 | `OLLAMA_MODEL` | `llama3.2` | Model tag to use |
 | `OLLAMA_TIMEOUT` | `60` | Request timeout in seconds |
-| `MEMORY_DB_PATH` | `memory.db` | Path to the Memory System's SQLite file |
+| `MEMORY_DB_PATH` | `memory.db` | Path to the Memory System / RAG SQLite file |
+| `EMBEDDING_MODEL` | `nomic-embed-text` | Ollama model used for RAG embeddings |

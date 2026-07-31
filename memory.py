@@ -206,7 +206,12 @@ def build_context(user: User, history: list[Interaction]) -> str:
     if not history:
         return f"You are tutoring {user.name}. This is their first recorded session -- no prior learning history yet."
 
-    topics = [h.topic for h in history if h.topic]
+    seen: set[str] = set()
+    topics: list[str] = []
+    for h in history:
+        if h.topic and h.topic not in seen:
+            seen.add(h.topic)
+            topics.append(h.topic)
     recap = "; ".join(f'"{t}"' for t in topics) if topics else "a few earlier sessions"
     return (
         f"You are tutoring {user.name}. They have recently studied: {recap}. "

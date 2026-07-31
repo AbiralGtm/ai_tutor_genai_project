@@ -6,3 +6,7 @@ python-dotenv>=1.0.0
 # official compatibility package that still provides them.
 langchain-classic>=1.0.0
 langchain-ollama>=1.1.0
+
+# RAG (rag.py). Only used to extract text from .pdf study material --
+# .txt/.md are read directly, no library needed.
+pypdf>=4.0.0
